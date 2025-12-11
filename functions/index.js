@@ -83,14 +83,17 @@ exports.remoteTerritoryOwnerHistory = onDocumentWritten(
  * from users/{uid} (fcmTokens array, fcmToken, or tokens).
  */
 exports.feedPushNotification = onDocumentCreated(
-  { region: 'us-central1', retry: true },
-  'feed/{feedId}',
+  { region: 'us-central1', retry: true, document: 'feed/{feedId}' },
   async (event) => {
     const eventId = event.id;
-    const feedId = event.params.feedId;
     const feedSnapshot = event.data;
-    const feedRef = feedSnapshot.ref;
+    if (!feedSnapshot) {
+      logger.error('feed event missing data', { eventId });
+      return null;
+    }
     const feedData = feedSnapshot.data() || {};
+    const feedId = (event.params && event.params.feedId) || feedData.id || 'unknown';
+    const feedRef = feedSnapshot.ref;
     const userId = feedData.userId;
 
     // Dedup if we already marked this feed as sent.
