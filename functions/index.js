@@ -95,6 +95,11 @@ exports.feedPushNotification = onDocumentCreated(
     const feedId = (event.params && event.params.feedId) || feedData.id || 'unknown';
     const feedRef = feedSnapshot.ref;
     const userId = feedData.userId;
+    const feedTokens = Array.isArray(feedData.tokens)
+      ? feedData.tokens.filter(Boolean)
+      : feedData.token
+        ? [feedData.token]
+        : [];
 
     // Dedup if we already marked this feed as sent.
     if (feedData.pushSentAt) {
@@ -102,8 +107,17 @@ exports.feedPushNotification = onDocumentCreated(
       return null;
     }
 
-    if (!userId) {
-      logger.warn('feed doc missing userId; skipping push', { feedId, eventId });
+    // If no author and no explicit tokens, skip and annotate.
+    if (!userId && feedTokens.length === 0) {
+      logger.warn('feed doc missing userId and tokens; skipping push', { feedId, eventId });
+      await feedRef.set(
+        {
+          pushStatus: 'skipped',
+          pushError: 'missing userId and tokens',
+          pushEventId: eventId
+        },
+        { merge: true }
+      );
       return null;
     }
 
@@ -118,44 +132,54 @@ exports.feedPushNotification = onDocumentCreated(
     const db = admin.firestore();
 
     try {
-      const usersSnapshot = await db.collection('users').get();
-
-      // Collect tokens for all users except the author.
-      const tokens = [];
+      const tokens = [...feedTokens];
       const tokenOwners = new Map(); // token -> Set<docRef> to prune invalids
 
-      usersSnapshot.forEach((doc) => {
-        if (doc.id === userId) {
-          return;
-        }
-        const data = doc.data() || {};
-        let userTokens = [];
-        if (Array.isArray(data.fcmTokens)) {
-          userTokens = userTokens.concat(data.fcmTokens);
-        }
-        if (data.fcmToken) {
-          userTokens.push(data.fcmToken);
-        }
-        if (Array.isArray(data.tokens)) {
-          userTokens = userTokens.concat(data.tokens);
-        }
-        userTokens = Array.from(new Set(userTokens.filter(Boolean)));
-        if (!userTokens.length) {
-          return;
-        }
-        userTokens.forEach((t) => {
-          tokens.push(t);
-          if (!tokenOwners.has(t)) {
-            tokenOwners.set(t, new Set());
-          }
-          tokenOwners.get(t).add(doc.ref);
-        });
-      });
+      if (userId) {
+        const usersSnapshot = await db.collection('users').get();
 
-      const uniqueTokens = Array.from(new Set(tokens));
+        // Collect tokens for all users except the author.
+        usersSnapshot.forEach((doc) => {
+          if (doc.id === userId) {
+            return;
+          }
+          const data = doc.data() || {};
+          let userTokens = [];
+          if (Array.isArray(data.fcmTokens)) {
+            userTokens = userTokens.concat(data.fcmTokens);
+          }
+          if (data.fcmToken) {
+            userTokens.push(data.fcmToken);
+          }
+          if (Array.isArray(data.tokens)) {
+            userTokens = userTokens.concat(data.tokens);
+          }
+          userTokens = Array.from(new Set(userTokens.filter(Boolean)));
+          if (!userTokens.length) {
+            return;
+          }
+          userTokens.forEach((t) => {
+            tokens.push(t);
+            if (!tokenOwners.has(t)) {
+              tokenOwners.set(t, new Set());
+            }
+            tokenOwners.get(t).add(doc.ref);
+          });
+        });
+      }
+
+      const uniqueTokens = Array.from(new Set(tokens.filter(Boolean)));
 
       if (!uniqueTokens.length) {
         logger.info('No FCM tokens for audience; skipping push', { feedId, authorId: userId, eventId });
+        await feedRef.set(
+          {
+            pushStatus: 'skipped',
+            pushError: 'no audience tokens',
+            pushEventId: eventId
+          },
+          { merge: true }
+        );
         return null;
       }
 
@@ -179,7 +203,7 @@ exports.feedPushNotification = onDocumentCreated(
           },
           data: {
             feedId,
-            userId,
+            userId: userId || '',
             activityId: (feedData.activityId || '').toString(),
             type: (feedData.type || '').toString(),
             date: (feedData.date || '').toString(),
@@ -188,21 +212,26 @@ exports.feedPushNotification = onDocumentCreated(
           }
         };
 
-        const response = await admin.messaging().sendEachForMulticast(message);
-        totalSuccess += response.successCount;
-        totalFailure += response.failureCount;
+        try {
+          const response = await admin.messaging().sendEachForMulticast(message);
+          totalSuccess += response.successCount;
+          totalFailure += response.failureCount;
 
-        response.responses.forEach((resp, idx) => {
-          if (!resp.success) {
-            const code = resp.error?.code || '';
-            if (
-              code === 'messaging/registration-token-not-registered' ||
-              code === 'messaging/invalid-registration-token'
-            ) {
-              invalidTokens.add(tokenChunk[idx]);
+          response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+              const code = resp.error?.code || '';
+              if (
+                code === 'messaging/registration-token-not-registered' ||
+                code === 'messaging/invalid-registration-token'
+              ) {
+                invalidTokens.add(tokenChunk[idx]);
+              }
             }
-          }
-        });
+          });
+        } catch (sendErr) {
+          logger.error('push send chunk failed', { feedId, eventId, error: sendErr });
+          totalFailure += tokenChunk.length;
+        }
       }
 
       if (invalidTokens.size) {
@@ -231,17 +260,15 @@ exports.feedPushNotification = onDocumentCreated(
         );
       }
 
-      if (totalSuccess === 0 && totalFailure > 0) {
-        throw new Error('All push attempts failed');
-      }
-
       await feedRef.set(
         {
+          pushStatus: totalSuccess > 0 ? 'sent' : 'failed',
           pushSentAt: FieldValue.serverTimestamp(),
           pushEventId: eventId,
           pushSuccessCount: totalSuccess,
           pushFailureCount: totalFailure,
-          pushAudienceTokens: uniqueTokens.length
+          pushAudienceTokens: uniqueTokens.length,
+          pushError: totalSuccess > 0 ? FieldValue.delete() : 'all failed'
         },
         { merge: true }
       );
@@ -258,7 +285,15 @@ exports.feedPushNotification = onDocumentCreated(
       return null;
     } catch (err) {
       logger.error('feed push failed', { feedId, authorId: userId, eventId, error: err });
-      throw err;
+      await feedRef.set(
+        {
+          pushStatus: 'failed',
+          pushError: (err && err.message) || 'unknown error',
+          pushEventId: eventId
+        },
+        { merge: true }
+      ).catch(() => {});
+      return null;
     }
   }
 );
