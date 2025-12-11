@@ -192,6 +192,7 @@ exports.feedPushNotification = onDocumentCreated(
       let totalSuccess = 0;
       let totalFailure = 0;
       const invalidTokens = new Set();
+      const failureReasons = {};
 
       for (const tokenChunk of chunks) {
         const message = {
@@ -220,6 +221,7 @@ exports.feedPushNotification = onDocumentCreated(
           response.responses.forEach((resp, idx) => {
             if (!resp.success) {
               const code = resp.error?.code || '';
+              failureReasons[code || 'unknown'] = (failureReasons[code || 'unknown'] || 0) + 1;
               if (
                 code === 'messaging/registration-token-not-registered' ||
                 code === 'messaging/invalid-registration-token'
@@ -231,6 +233,8 @@ exports.feedPushNotification = onDocumentCreated(
         } catch (sendErr) {
           logger.error('push send chunk failed', { feedId, eventId, error: sendErr });
           totalFailure += tokenChunk.length;
+          const code = sendErr.code || sendErr.message || 'chunk_error';
+          failureReasons[code] = (failureReasons[code] || 0) + tokenChunk.length;
         }
       }
 
@@ -268,7 +272,8 @@ exports.feedPushNotification = onDocumentCreated(
           pushSuccessCount: totalSuccess,
           pushFailureCount: totalFailure,
           pushAudienceTokens: uniqueTokens.length,
-          pushError: totalSuccess > 0 ? FieldValue.delete() : 'all failed'
+          pushFailureReasons: Object.keys(failureReasons).length ? failureReasons : FieldValue.delete(),
+          pushError: totalSuccess > 0 ? FieldValue.delete() : (Object.keys(failureReasons)[0] || 'all failed')
         },
         { merge: true }
       );
