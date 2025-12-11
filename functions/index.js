@@ -83,14 +83,24 @@ exports.remoteTerritoryOwnerHistory = onDocumentWritten(
  * from users/{uid} (fcmTokens array, fcmToken, or tokens).
  */
 exports.feedPushNotification = onDocumentCreated(
+  { region: 'us-central1', retry: true },
   'feed/{feedId}',
   async (event) => {
+    const eventId = event.id;
     const feedId = event.params.feedId;
-    const feedData = event.data.data() || {};
+    const feedSnapshot = event.data;
+    const feedRef = feedSnapshot.ref;
+    const feedData = feedSnapshot.data() || {};
     const userId = feedData.userId;
 
+    // Dedup if we already marked this feed as sent.
+    if (feedData.pushSentAt) {
+      logger.info('feed push already marked sent; skipping', { feedId, eventId });
+      return null;
+    }
+
     if (!userId) {
-      logger.warn('feed doc missing userId; skipping push', { feedId });
+      logger.warn('feed doc missing userId; skipping push', { feedId, eventId });
       return null;
     }
 
@@ -103,126 +113,149 @@ exports.feedPushNotification = onDocumentCreated(
       '';
 
     const db = admin.firestore();
-    const usersSnapshot = await db.collection('users').get();
 
-    // Collect tokens for all users except the author.
-    const tokens = [];
-    const tokenOwners = new Map(); // token -> Set<docRef> to prune invalids
+    try {
+      const usersSnapshot = await db.collection('users').get();
 
-    usersSnapshot.forEach((doc) => {
-      if (doc.id === userId) {
-        return;
-      }
-      const data = doc.data() || {};
-      let userTokens = [];
-      if (Array.isArray(data.fcmTokens)) {
-        userTokens = userTokens.concat(data.fcmTokens);
-      }
-      if (data.fcmToken) {
-        userTokens.push(data.fcmToken);
-      }
-      if (Array.isArray(data.tokens)) {
-        userTokens = userTokens.concat(data.tokens);
-      }
-      userTokens = Array.from(new Set(userTokens.filter(Boolean)));
-      if (!userTokens.length) {
-        return;
-      }
-      userTokens.forEach((t) => {
-        tokens.push(t);
-        if (!tokenOwners.has(t)) {
-          tokenOwners.set(t, new Set());
+      // Collect tokens for all users except the author.
+      const tokens = [];
+      const tokenOwners = new Map(); // token -> Set<docRef> to prune invalids
+
+      usersSnapshot.forEach((doc) => {
+        if (doc.id === userId) {
+          return;
         }
-        tokenOwners.get(t).add(doc.ref);
-      });
-    });
-
-    const uniqueTokens = Array.from(new Set(tokens));
-
-    if (!uniqueTokens.length) {
-      logger.info('No FCM tokens for audience; skipping push', { feedId, authorId: userId });
-      return null;
-    }
-
-    const chunks = [];
-    const chunkSize = 500; // FCM multicast limit
-    for (let i = 0; i < uniqueTokens.length; i += chunkSize) {
-      chunks.push(uniqueTokens.slice(i, i + chunkSize));
-    }
-
-    let totalSuccess = 0;
-    let totalFailure = 0;
-    const invalidTokens = new Set();
-
-    for (const tokenChunk of chunks) {
-      const message = {
-        tokens: tokenChunk,
-        notification: {
-          title,
-          body,
-          image: feedData.userAvatarURL || undefined
-        },
-        data: {
-          feedId,
-          userId,
-          activityId: (feedData.activityId || '').toString(),
-          type: (feedData.type || '').toString(),
-          date: (feedData.date || '').toString(),
-          isPersonal: (feedData.isPersonal ?? '').toString()
+        const data = doc.data() || {};
+        let userTokens = [];
+        if (Array.isArray(data.fcmTokens)) {
+          userTokens = userTokens.concat(data.fcmTokens);
         }
-      };
-
-      const response = await admin.messaging().sendEachForMulticast(message);
-      totalSuccess += response.successCount;
-      totalFailure += response.failureCount;
-
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const code = resp.error?.code || '';
-          if (
-            code === 'messaging/registration-token-not-registered' ||
-            code === 'messaging/invalid-registration-token'
-          ) {
-            invalidTokens.add(tokenChunk[idx]);
+        if (data.fcmToken) {
+          userTokens.push(data.fcmToken);
+        }
+        if (Array.isArray(data.tokens)) {
+          userTokens = userTokens.concat(data.tokens);
+        }
+        userTokens = Array.from(new Set(userTokens.filter(Boolean)));
+        if (!userTokens.length) {
+          return;
+        }
+        userTokens.forEach((t) => {
+          tokens.push(t);
+          if (!tokenOwners.has(t)) {
+            tokenOwners.set(t, new Set());
           }
-        }
-      });
-    }
-
-    if (invalidTokens.size) {
-      const removals = new Map(); // ref.path -> { ref, tokens[] }
-      invalidTokens.forEach((token) => {
-        const owners = tokenOwners.get(token);
-        if (!owners) return;
-        owners.forEach((ref) => {
-          const key = ref.path;
-          if (!removals.has(key)) {
-            removals.set(key, { ref, tokens: [] });
-          }
-          removals.get(key).tokens.push(token);
+          tokenOwners.get(t).add(doc.ref);
         });
       });
 
-      await Promise.all(
-        Array.from(removals.values()).map(({ ref, tokens: toks }) =>
-          ref.update({
-            fcmTokens: FieldValue.arrayRemove(...toks),
-            tokens: FieldValue.arrayRemove(...toks)
-          }).catch((err) => {
-            logger.warn('Failed to prune invalid tokens', { feedId, authorId: userId, error: err });
-          })
-        )
+      const uniqueTokens = Array.from(new Set(tokens));
+
+      if (!uniqueTokens.length) {
+        logger.info('No FCM tokens for audience; skipping push', { feedId, authorId: userId, eventId });
+        return null;
+      }
+
+      const chunks = [];
+      const chunkSize = 500; // FCM multicast limit
+      for (let i = 0; i < uniqueTokens.length; i += chunkSize) {
+        chunks.push(uniqueTokens.slice(i, i + chunkSize));
+      }
+
+      let totalSuccess = 0;
+      let totalFailure = 0;
+      const invalidTokens = new Set();
+
+      for (const tokenChunk of chunks) {
+        const message = {
+          tokens: tokenChunk,
+          notification: {
+            title,
+            body,
+            image: feedData.userAvatarURL || undefined
+          },
+          data: {
+            feedId,
+            userId,
+            activityId: (feedData.activityId || '').toString(),
+            type: (feedData.type || '').toString(),
+            date: (feedData.date || '').toString(),
+            isPersonal: (feedData.isPersonal ?? '').toString(),
+            eventId
+          }
+        };
+
+        const response = await admin.messaging().sendEachForMulticast(message);
+        totalSuccess += response.successCount;
+        totalFailure += response.failureCount;
+
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            const code = resp.error?.code || '';
+            if (
+              code === 'messaging/registration-token-not-registered' ||
+              code === 'messaging/invalid-registration-token'
+            ) {
+              invalidTokens.add(tokenChunk[idx]);
+            }
+          }
+        });
+      }
+
+      if (invalidTokens.size) {
+        const removals = new Map(); // ref.path -> { ref, tokens[] }
+        invalidTokens.forEach((token) => {
+          const owners = tokenOwners.get(token);
+          if (!owners) return;
+          owners.forEach((ref) => {
+            const key = ref.path;
+            if (!removals.has(key)) {
+              removals.set(key, { ref, tokens: [] });
+            }
+            removals.get(key).tokens.push(token);
+          });
+        });
+
+        await Promise.all(
+          Array.from(removals.values()).map(({ ref, tokens: toks }) =>
+            ref.update({
+              fcmTokens: FieldValue.arrayRemove(...toks),
+              tokens: FieldValue.arrayRemove(...toks)
+            }).catch((err) => {
+              logger.warn('Failed to prune invalid tokens', { feedId, authorId: userId, eventId, error: err });
+            })
+          )
+        );
+      }
+
+      if (totalSuccess === 0 && totalFailure > 0) {
+        throw new Error('All push attempts failed');
+      }
+
+      await feedRef.set(
+        {
+          pushSentAt: FieldValue.serverTimestamp(),
+          pushEventId: eventId,
+          pushSuccessCount: totalSuccess,
+          pushFailureCount: totalFailure,
+          pushAudienceTokens: uniqueTokens.length
+        },
+        { merge: true }
       );
+
+      logger.info('feed push processed', {
+        feedId,
+        authorId: userId,
+        eventId,
+        audienceTokens: uniqueTokens.length,
+        successCount: totalSuccess,
+        failureCount: totalFailure
+      });
+
+      return null;
+    } catch (err) {
+      logger.error('feed push failed', { feedId, authorId: userId, eventId, error: err });
+      throw err;
     }
-
-    logger.info('feed push processed', {
-      feedId,
-      authorId: userId,
-      audienceTokens: uniqueTokens.length,
-      successCount: totalSuccess,
-      failureCount: totalFailure
-    });
-
-    return null;
   }
 );
