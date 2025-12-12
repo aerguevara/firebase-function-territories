@@ -121,13 +121,34 @@ exports.feedPushNotification = onDocumentCreated(
       return null;
     }
 
-    const title = feedData.title || 'Nuevo evento';
-    const body =
-      feedData.subtitle ||
-      feedData.body ||
-      feedData.message ||
-      (feedData.xpEarned != null ? `Ganaste ${feedData.xpEarned} XP` : '') ||
-      '';
+    const isPersonal = !!feedData.isPersonal;
+    const authorName = feedData.relatedUserName || 'Un jugador';
+    const activityType = (feedData.activityData && feedData.activityData.activityType) || feedData.type || '';
+    const xp = feedData.activityData?.xpEarned ?? feedData.xpEarned;
+    const distanceMeters = feedData.activityData?.distanceMeters;
+    const distanceText =
+      typeof distanceMeters === 'number' && !Number.isNaN(distanceMeters)
+        ? `${(distanceMeters / 1000).toFixed(1)} km`
+        : '';
+
+    const title = isPersonal
+      ? feedData.title || 'Tu actividad se completó'
+      : feedData.title || `${authorName} completó una actividad`;
+
+    const body = isPersonal
+      ? feedData.subtitle ||
+        feedData.body ||
+        feedData.message ||
+        (xp != null ? `Ganaste ${xp} XP` : '') ||
+        ''
+      : feedData.subtitle ||
+        feedData.body ||
+        feedData.message ||
+        (distanceText
+          ? `${authorName} completó ${distanceText}${activityType ? ` (${activityType})` : ''}`
+          : xp != null
+            ? `${authorName} ganó ${xp} XP`
+            : `${authorName} completó una actividad`);
 
     const db = admin.firestore();
 
@@ -209,6 +230,7 @@ exports.feedPushNotification = onDocumentCreated(
             type: (feedData.type || '').toString(),
             date: (feedData.date || '').toString(),
             isPersonal: (feedData.isPersonal ?? '').toString(),
+            relatedUserName: authorName,
             eventId
           }
         };
