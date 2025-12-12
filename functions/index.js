@@ -214,6 +214,7 @@ exports.feedPushNotification = onDocumentCreated(
       let totalFailure = 0;
       const invalidTokens = new Set();
       const failureReasons = {};
+      const refreshUsers = new Set(); // users that need to refresh token (e.g., third-party-auth-error)
 
       for (const tokenChunk of chunks) {
         const message = {
@@ -246,9 +247,16 @@ exports.feedPushNotification = onDocumentCreated(
               failureReasons[code || 'unknown'] = (failureReasons[code || 'unknown'] || 0) + 1;
               if (
                 code === 'messaging/registration-token-not-registered' ||
-                code === 'messaging/invalid-registration-token'
+                code === 'messaging/invalid-registration-token' ||
+                code === 'messaging/third-party-auth-error'
               ) {
                 invalidTokens.add(tokenChunk[idx]);
+                if (code === 'messaging/third-party-auth-error') {
+                  const owners = tokenOwners.get(tokenChunk[idx]);
+                  if (owners) {
+                    owners.forEach((ref) => refreshUsers.add(ref));
+                  }
+                }
               }
             }
           });
@@ -281,6 +289,19 @@ exports.feedPushNotification = onDocumentCreated(
               tokens: FieldValue.arrayRemove(...toks)
             }).catch((err) => {
               logger.warn('Failed to prune invalid tokens', { feedId, authorId: userId, eventId, error: err });
+            })
+          )
+        );
+      }
+
+      if (refreshUsers.size) {
+        await Promise.all(
+          Array.from(refreshUsers).map((ref) =>
+            ref.update({
+              needsTokenRefresh: true,
+              needsTokenRefreshAt: FieldValue.serverTimestamp()
+            }).catch((err) => {
+              logger.warn('Failed to mark user for token refresh', { userRef: ref.path, feedId, eventId, error: err });
             })
           )
         );
