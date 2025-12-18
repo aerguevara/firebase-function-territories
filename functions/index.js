@@ -168,7 +168,6 @@ exports.feedPushNotification = onDocumentCreated(
           const data = doc.data() || {};
           let userTokens = [];
           const fcmTokensField = data.fcmTokens;
-          const tokensField = data.tokens;
 
           if (Array.isArray(fcmTokensField)) {
             userTokens = userTokens.concat(fcmTokensField);
@@ -184,16 +183,6 @@ exports.feedPushNotification = onDocumentCreated(
             userTokens.push(data.fcmToken);
             if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
             ownerMeta.get(doc.ref.path).arrayFields.add('fcmTokens'); // treat legacy single token like array field for removal
-          }
-
-          if (Array.isArray(tokensField)) {
-            userTokens = userTokens.concat(tokensField);
-            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
-            ownerMeta.get(doc.ref.path).arrayFields.add('tokens');
-          } else if (typeof tokensField === 'string' && tokensField.trim()) {
-            userTokens.push(tokensField);
-            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
-            ownerMeta.get(doc.ref.path).stringFields.set('tokens', tokensField);
           }
 
           userTokens = Array.from(new Set(userTokens.filter(Boolean)));
@@ -308,7 +297,7 @@ exports.feedPushNotification = onDocumentCreated(
             const meta = ownerMeta.get(ref.path);
             const updateData = {};
 
-            const arrayFields = meta?.arrayFields || new Set(['fcmTokens', 'tokens']);
+            const arrayFields = meta?.arrayFields || new Set(['fcmTokens']);
             arrayFields.forEach((field) => {
               updateData[field] = FieldValue.arrayRemove(...toks);
             });
