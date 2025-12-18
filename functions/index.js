@@ -155,6 +155,7 @@ exports.feedPushNotification = onDocumentCreated(
     try {
       const tokens = [...feedTokens];
       const tokenOwners = new Map(); // token -> Set<docRef> to prune invalids
+      const ownerMeta = new Map(); // ref.path -> { ref, arrayFields: Set, stringFields: Map }
 
       if (userId) {
         const usersSnapshot = await db.collection('users').get();
@@ -166,15 +167,35 @@ exports.feedPushNotification = onDocumentCreated(
           }
           const data = doc.data() || {};
           let userTokens = [];
-          if (Array.isArray(data.fcmTokens)) {
-            userTokens = userTokens.concat(data.fcmTokens);
+          const fcmTokensField = data.fcmTokens;
+          const tokensField = data.tokens;
+
+          if (Array.isArray(fcmTokensField)) {
+            userTokens = userTokens.concat(fcmTokensField);
+            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
+            ownerMeta.get(doc.ref.path).arrayFields.add('fcmTokens');
+          } else if (typeof fcmTokensField === 'string' && fcmTokensField.trim()) {
+            userTokens.push(fcmTokensField);
+            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
+            ownerMeta.get(doc.ref.path).stringFields.set('fcmTokens', fcmTokensField);
           }
+
           if (data.fcmToken) {
             userTokens.push(data.fcmToken);
+            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
+            ownerMeta.get(doc.ref.path).arrayFields.add('fcmTokens'); // treat legacy single token like array field for removal
           }
-          if (Array.isArray(data.tokens)) {
-            userTokens = userTokens.concat(data.tokens);
+
+          if (Array.isArray(tokensField)) {
+            userTokens = userTokens.concat(tokensField);
+            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
+            ownerMeta.get(doc.ref.path).arrayFields.add('tokens');
+          } else if (typeof tokensField === 'string' && tokensField.trim()) {
+            userTokens.push(tokensField);
+            if (!ownerMeta.has(doc.ref.path)) ownerMeta.set(doc.ref.path, { ref: doc.ref, arrayFields: new Set(), stringFields: new Map() });
+            ownerMeta.get(doc.ref.path).stringFields.set('tokens', tokensField);
           }
+
           userTokens = Array.from(new Set(userTokens.filter(Boolean)));
           if (!userTokens.length) {
             return;
@@ -283,14 +304,27 @@ exports.feedPushNotification = onDocumentCreated(
         });
 
         await Promise.all(
-          Array.from(removals.values()).map(({ ref, tokens: toks }) =>
-            ref.update({
-              fcmTokens: FieldValue.arrayRemove(...toks),
-              tokens: FieldValue.arrayRemove(...toks)
-            }).catch((err) => {
+          Array.from(removals.values()).map(({ ref, tokens: toks }) => {
+            const meta = ownerMeta.get(ref.path);
+            const updateData = {};
+
+            const arrayFields = meta?.arrayFields || new Set(['fcmTokens', 'tokens']);
+            arrayFields.forEach((field) => {
+              updateData[field] = FieldValue.arrayRemove(...toks);
+            });
+
+            if (meta?.stringFields) {
+              meta.stringFields.forEach((value, field) => {
+                if (toks.includes(value)) {
+                  updateData[field] = FieldValue.delete();
+                }
+              });
+            }
+
+            return ref.update(updateData).catch((err) => {
               logger.warn('Failed to prune invalid tokens', { feedId, authorId: userId, eventId, error: err });
-            })
-          )
+            });
+          })
         );
       }
 
