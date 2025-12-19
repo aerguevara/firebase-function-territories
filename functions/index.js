@@ -121,7 +121,8 @@ exports.feedPushNotification = onDocumentCreated(
       return null;
     }
 
-    const isPersonal = !!feedData.isPersonal;
+    // Treat all feed items as sociales; ignore isPersonal flag (always true upstream).
+    const isPersonal = false;
     const authorName = feedData.relatedUserName || 'Un jugador';
     const activityType = (feedData.activityData && feedData.activityData.activityType) || feedData.type || '';
     const xp = feedData.activityData?.xpEarned ?? feedData.xpEarned;
@@ -131,24 +132,17 @@ exports.feedPushNotification = onDocumentCreated(
         ? `${(distanceMeters / 1000).toFixed(1)} km`
         : '';
 
-    const title = isPersonal
-      ? feedData.title || 'Tu actividad se completó'
-      : feedData.title || `${authorName} completó una actividad`;
+    const title = feedData.title || `${authorName} completó una actividad`;
 
-    const body = isPersonal
-      ? feedData.subtitle ||
-        feedData.body ||
-        feedData.message ||
-        (xp != null ? `Ganaste ${xp} XP` : '') ||
-        ''
-      : feedData.subtitle ||
-        feedData.body ||
-        feedData.message ||
-        (distanceText
-          ? `${authorName} completó ${distanceText}${activityType ? ` (${activityType})` : ''}`
-          : xp != null
-            ? `${authorName} ganó ${xp} XP`
-            : `${authorName} completó una actividad`);
+    const body =
+      feedData.subtitle ||
+      feedData.body ||
+      feedData.message ||
+      (distanceText
+        ? `${authorName} completó ${distanceText}${activityType ? ` (${activityType})` : ''}`
+        : xp != null
+          ? `${authorName} ganó ${xp} XP`
+          : `${authorName} completó una actividad`);
 
     const db = admin.firestore();
 
