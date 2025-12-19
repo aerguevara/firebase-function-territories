@@ -123,7 +123,27 @@ exports.feedPushNotification = onDocumentCreated(
 
     // Treat all feed items as sociales; ignore isPersonal flag (always true upstream).
     const isPersonal = false;
-    const authorName = feedData.relatedUserName || 'Un jugador';
+    const db = admin.firestore();
+
+    let authorName = feedData.relatedUserName;
+    if (!authorName && userId) {
+      try {
+        const authorDoc = await db.collection('users').doc(userId).get();
+        const authorData = authorDoc.data() || {};
+        authorName =
+          authorData.displayName ||
+          authorData.name ||
+          authorData.fullName ||
+          authorData.username ||
+          authorData.userName ||
+          null;
+      } catch (err) {
+        logger.warn('Failed to load author name', { feedId, authorId: userId, eventId, error: err });
+      }
+    }
+    if (!authorName) {
+      authorName = 'Un jugador';
+    }
     const activityType = (feedData.activityData && feedData.activityData.activityType) || feedData.type || '';
     const xp = feedData.activityData?.xpEarned ?? feedData.xpEarned;
     const distanceMeters = feedData.activityData?.distanceMeters;
@@ -143,8 +163,6 @@ exports.feedPushNotification = onDocumentCreated(
         : xp != null
           ? `${authorName} ganó ${xp} XP`
           : `${authorName} completó una actividad`);
-
-    const db = admin.firestore();
 
     try {
       const tokens = [...feedTokens];
