@@ -152,13 +152,18 @@ exports.feedPushNotification = onDocumentCreated(
         ? `${(distanceMeters / 1000).toFixed(1)} km`
         : '';
 
-    const title = feedData.title || `${authorName} completó una actividad`;
+    const baseTitle = (feedData.title && feedData.title.trim()) || '';
+    const title = baseTitle ? `${authorName}: ${baseTitle}` : `${authorName} completó una actividad`;
 
-    const body =
-      feedData.subtitle ||
-      feedData.body ||
-      feedData.message ||
-      (distanceText
+    const baseBody =
+      (feedData.subtitle && feedData.subtitle.trim()) ||
+      (feedData.body && feedData.body.trim()) ||
+      (feedData.message && feedData.message.trim()) ||
+      '';
+
+    const body = baseBody
+      ? `${authorName}: ${baseBody}`
+      : (distanceText
         ? `${authorName} completó ${distanceText}${activityType ? ` (${activityType})` : ''}`
         : xp != null
           ? `${authorName} ganó ${xp} XP`
